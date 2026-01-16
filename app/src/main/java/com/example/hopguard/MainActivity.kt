@@ -2,39 +2,20 @@ package com.example.hopguard
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattServer
-import android.bluetooth.BluetoothGattServerCallback
-import android.bluetooth.BluetoothGattService
-import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
-import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
-import android.bluetooth.le.BluetoothLeAdvertiser
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
+import android.bluetooth.*
+import android.bluetooth.le.*
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelUuid
 import android.util.Log
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.ListView
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import java.util.ArrayList
-import java.util.UUID
+import java.util.*
 
-// HopGuard Constants
+// HopGuard UUIDs
 val SERVICE_UUID: UUID = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
 val CHARACTERISTIC_UUID: UUID = UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
 
@@ -43,7 +24,10 @@ class MainActivity : AppCompatActivity() {
     // UI Elements
     private lateinit var btnScan: Button
     private lateinit var btnHost: Button
+    private lateinit var btnSend: Button
+    private lateinit var etMessage: EditText
     private lateinit var tvStatus: TextView
+    private lateinit var tvChatLog: TextView
     private lateinit var deviceListView: ListView
 
     // List Logic
@@ -54,8 +38,9 @@ class MainActivity : AppCompatActivity() {
     // Bluetooth Tools
     private lateinit var bluetoothAdapter: BluetoothAdapter
 
-    // Server & Advertiser (For Hosting)
-    private var bluetoothGattServer: BluetoothGattServer? = null
+    // Connection Variables
+    private var connectedGatt: BluetoothGatt? = null // For the Client (Sender)
+    private var bluetoothGattServer: BluetoothGattServer? = null // For the Server (Receiver)
     private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,43 +50,41 @@ class MainActivity : AppCompatActivity() {
         // 1. Setup UI
         btnScan = findViewById(R.id.btnScan)
         btnHost = findViewById(R.id.btnHost)
+        btnSend = findViewById(R.id.btnSend)
+        etMessage = findViewById(R.id.etMessage)
         tvStatus = findViewById(R.id.tvStatus)
+        tvChatLog = findViewById(R.id.tvChatLog)
         deviceListView = findViewById(R.id.deviceListView)
 
-        // Setup the List Adapter
         listAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, deviceListLabels)
         deviceListView.adapter = listAdapter
 
-        // 2. Initialize Bluetooth
+        // 2. Init Bluetooth
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
 
-        // 3. Button Click Listeners
-        btnScan.setOnClickListener {
-            if (hasPermissions()) {
-                startScanning()
-            } else {
-                requestPermissions()
-            }
-        }
+        // 3. Listeners
+        btnScan.setOnClickListener { if (hasPermissions()) startScanning() else requestPermissions() }
+        btnHost.setOnClickListener { if (hasPermissions()) startHosting() else requestPermissions() }
 
-        btnHost.setOnClickListener {
-            if (hasPermissions()) {
-                startHosting()
-            } else {
-                requestPermissions()
-            }
-        }
-
-        // 4. List Click Listener (To Connect)
         deviceListView.setOnItemClickListener { _, _, position, _ ->
             val device = foundDevices[position]
             connectToDevice(device)
         }
+
+        // 4. SEND BUTTON LOGIC (Client Side)
+        btnSend.setOnClickListener {
+            val message = etMessage.text.toString()
+            if (message.isNotEmpty() && connectedGatt != null) {
+                sendMessage(message)
+            } else {
+                Toast.makeText(this, "Not connected or empty message", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     // ==========================================
-    // CLIENT LOGIC (Scanning & Connecting)
+    // CLIENT LOGIC (Scanning & Sending)
     // ==========================================
 
     @SuppressLint("MissingPermission")
@@ -112,84 +95,104 @@ class MainActivity : AppCompatActivity() {
         listAdapter.notifyDataSetChanged()
 
         val scanner = bluetoothAdapter.bluetoothLeScanner
-        if (scanner == null) {
-            tvStatus.text = "Error: BT Off"
-            return
-        }
+        if (scanner == null) { tvStatus.text = "Error: BT Off"; return }
 
         val scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 result?.device?.let { device ->
-                    // Only add if not already in list
+                    val advertisedName = result.scanRecord?.deviceName
+                    val finalName = advertisedName ?: device.name ?: "Unknown"
+
                     if (!foundDevices.contains(device)) {
                         foundDevices.add(device)
-                        val name = device.name ?: "Unknown"
-                        val rssi = result.rssi
-                        deviceListLabels.add("$name\n$rssi dBm | ${device.address}")
+                        deviceListLabels.add("$finalName\n${result.rssi} dBm | ${device.address}")
                         listAdapter.notifyDataSetChanged()
                     }
                 }
             }
-            override fun onScanFailed(errorCode: Int) {
-                tvStatus.text = "Scan Failed: $errorCode"
-            }
         }
-
         scanner.startScan(scanCallback)
 
-        // Stop scan after 10s
         android.os.Handler().postDelayed({
             scanner.stopScan(scanCallback)
-            if (foundDevices.isEmpty()) {
-                tvStatus.text = "Status: Scan finished. No devices found."
-            } else {
-                tvStatus.text = "Status: Scan finished. Select a device."
-            }
+            tvStatus.text = "Status: Scan Finished"
         }, 10000)
     }
 
     @SuppressLint("MissingPermission")
     private fun connectToDevice(device: BluetoothDevice) {
-        tvStatus.text = "Status: Connecting to ${device.address}..."
-
-        // Connect to the device (Client connects to Server)
-        device.connectGatt(this, false, object : BluetoothGattCallback() {
+        tvStatus.text = "Status: Connecting..."
+        connectedGatt = device.connectGatt(this, false, object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    runOnUiThread {
-                        tvStatus.text = "Status: CONNECTED to ${device.name}"
-                        Toast.makeText(this@MainActivity, "Connected!", Toast.LENGTH_SHORT).show()
-                    }
-                    // Important: Discover services immediately
-                    gatt?.discoverServices()
+                    runOnUiThread { tvStatus.text = "Connected to ${device.name}" }
+                    gatt?.discoverServices() // Discovery is key!
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    runOnUiThread { tvStatus.text = "Status: Disconnected" }
+                    runOnUiThread { tvStatus.text = "Disconnected" }
                 }
             }
         })
     }
 
+    @SuppressLint("MissingPermission")
+    private fun sendMessage(message: String) {
+        val service = connectedGatt?.getService(SERVICE_UUID)
+        val characteristic = service?.getCharacteristic(CHARACTERISTIC_UUID)
+
+        if (characteristic != null) {
+            characteristic.value = message.toByteArray()
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            val success = connectedGatt?.writeCharacteristic(characteristic)
+
+            if (success == true) {
+                tvChatLog.append("\nMe: $message")
+                etMessage.text.clear()
+            } else {
+                Toast.makeText(this, "Failed to send", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "Service not found. Wait a moment.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     // ==========================================
-    // SERVER LOGIC (Hosting & Advertising)
+    // SERVER LOGIC (Hosting & Receiving)
     // ==========================================
 
     @SuppressLint("MissingPermission")
     private fun startHosting() {
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
 
-        // 1. Open the Server
-        bluetoothGattServer = bluetoothManager.openGattServer(this, object : BluetoothGattServerCallback() {
+        // 1. Setup Server Callback (To Receive Messages)
+        val serverCallback = object : BluetoothGattServerCallback() {
             override fun onConnectionStateChange(device: BluetoothDevice?, status: Int, newState: Int) {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    runOnUiThread {
-                        tvStatus.text = "Status: A Client Connected!"
-                        Toast.makeText(this@MainActivity, "Client Connected!", Toast.LENGTH_SHORT).show()
-                    }
+                    runOnUiThread { tvStatus.text = "Status: Client Connected!" }
                 }
             }
-        })
 
-        // 2. Add Service & Characteristic
+            override fun onCharacteristicWriteRequest(
+                device: BluetoothDevice?, requestId: Int, characteristic: BluetoothGattCharacteristic?,
+                preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
+            ) {
+                super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
+
+                // Acknowledge the write (Important!)
+                if (responseNeeded) {
+                    bluetoothGattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                }
+
+                // Decode the message
+                val message = value?.toString(Charsets.UTF_8) ?: ""
+                runOnUiThread {
+                    tvChatLog.append("\n${device?.address}: $message")
+                }
+            }
+        }
+
+        bluetoothGattServer = bluetoothManager.openGattServer(this, serverCallback)
+
+        // 2. Add Service
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         val characteristic = BluetoothGattCharacteristic(
             CHARACTERISTIC_UUID,
@@ -199,28 +202,22 @@ class MainActivity : AppCompatActivity() {
         service.addCharacteristic(characteristic)
         bluetoothGattServer?.addService(service)
 
-        // 3. Start Advertising
+        // 3. Advertise
         bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setConnectable(true)
             .build()
-
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(true)
             .addServiceUuid(ParcelUuid(SERVICE_UUID))
             .build()
 
-        val advertiseCallback = object : AdvertiseCallback() {
+        bluetoothLeAdvertiser?.startAdvertising(settings, data, object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                runOnUiThread { tvStatus.text = "Status: HOSTING (Visible to others)" }
+                runOnUiThread { tvStatus.text = "Status: HOSTING (Waiting for messages...)" }
             }
-            override fun onStartFailure(errorCode: Int) {
-                Log.e("HopGuard", "Advertising failed: $errorCode")
-            }
-        }
-
-        bluetoothLeAdvertiser?.startAdvertising(settings, data, advertiseCallback)
+        })
     }
 
     // ==========================================
@@ -237,17 +234,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.requestPermissions(this, arrayOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_ADVERTISE
-            ), 1)
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE)
         } else {
-            ActivityCompat.requestPermissions(this, arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ), 1)
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
         }
+        ActivityCompat.requestPermissions(this, permissions, 1)
     }
 }
