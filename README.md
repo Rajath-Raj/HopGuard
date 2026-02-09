@@ -1,2 +1,2 @@
-# HopGuard
-offline, infrastructure-less mesh network for disaster communication using Android BLE.
+# HOPGUARD
+Hybrid Bluetooth Mesh Ecosystem with Static Relay Nodes for Disaster Resilience
