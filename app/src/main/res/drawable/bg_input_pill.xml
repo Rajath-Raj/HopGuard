@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/input_pill_bg" />
+    <corners android:radius="24dp" />
+    <!-- Removed stroke as per user desc: 'Main Background... Input Box... Same color as card', no stroke mentioned for pill, 
+         but 'Card Border... visible'. I will stick to 'Same color as top card' for BG. 
+         Wait, user said: "Input Box (The Pill): #1E293B... Same color as the top card...". 
+         Top Card has a border. Should pill have a border? User didn't say. 
+         I will keep the stroke but make it subtle/matching card stroke if needed. 
+         Actually, let's use card_stroke to match the card aesthetic since they share BG color. -->
+    <stroke android:width="1dp" android:color="@color/card_stroke" />
+</shape>
